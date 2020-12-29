@@ -69,7 +69,7 @@ impl<T: Read + Seek> ZipFs<T> {
         let mut archive = ZipArchive::new(&mut *file)?;
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
-            let path = file.sanitized_name();
+            let path = file.mangled_name();
 
             index.insert(path, ());
         }

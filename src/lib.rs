@@ -47,7 +47,8 @@
 //! [`LocalFs`]: ./struct.LocalFs.html
 //! [dir]: https://en.wikipedia.org/wiki/Directory_traversal_attack
 #![deny(warnings)]
-use std::any::Any;
+#![feature(osstring_ascii)]
+use std::{any::Any, path::Component};
 use std::collections::LinkedList;
 use std::io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -111,6 +112,7 @@ struct Mount {
 /// Virtual filesystem.
 pub struct MiniFs {
     mount: LinkedList<Mount>,
+    case_sensitive: bool,
 }
 
 impl Store for MiniFs {
@@ -118,7 +120,7 @@ impl Store for MiniFs {
 
     fn open_path(&self, path: &Path) -> Result<File> {
         let next = self.mount.iter().rev().find_map(|mnt| {
-            if let Ok(np) = path.strip_prefix(&mnt.path) {
+            if let Ok(np) = path.strip_prefix_ex(&mnt.path, self.case_sensitive) {
                 Some((np, &mnt.store))
             } else {
                 None
@@ -139,9 +141,9 @@ impl Store for MiniFs {
             self.mount
                 .iter()
                 .rev()
-                .find(|m| path.strip_prefix(&m.path).is_ok())
+                .find(|m| path.strip_prefix_ex(&m.path, self.case_sensitive).is_ok())
                 .into_iter()
-                .flat_map(move |m| match path.strip_prefix(&m.path) {
+                .flat_map(move |m| match path.strip_prefix_ex(&m.path, self.case_sensitive) {
                     Ok(np) => m.store.entries_path(np).unwrap(),
                     Err(_) => Entries::new(None),
                 }),
@@ -153,6 +155,14 @@ impl MiniFs {
     pub fn new() -> Self {
         Self {
             mount: LinkedList::new(),
+            case_sensitive: false,
+        }
+    }
+
+    pub fn new_caseless() -> Self {
+        Self {
+            mount: LinkedList::new(),
+            case_sensitive: true,
         }
     }
 
@@ -308,5 +318,49 @@ impl RamFs {
 
     pub fn index(self) -> Self {
         self
+    }
+}
+
+struct StripPrefixExError(());
+trait StripPrefixEx {
+    fn strip_prefix_ex<P>(&self, base: P, case_sensitivify: bool) -> std::result::Result<&Path, StripPrefixExError>
+    where
+        P: AsRef<Path>;
+}
+
+impl StripPrefixEx for Path {
+    fn strip_prefix_ex<P>(&self, base: P, case_sensitivify: bool) -> std::result::Result<&Path, StripPrefixExError>
+    where
+        P: AsRef<Path>,
+    {
+        if case_sensitivify {
+            self.strip_prefix(base).or(Err(StripPrefixExError(())))
+        } else {
+            _strip_prefix_case_insensitive(&self, base.as_ref())
+        }
+    }
+}
+
+fn _strip_prefix_case_insensitive<'a>(path: &'a Path, base: &Path) -> std::result::Result<&'a Path, StripPrefixExError> {
+    iter_after_case_insensitive(path.components(), base.components())
+        .map(|c| c.as_path())
+        .ok_or(StripPrefixExError(()))
+}
+
+fn iter_after_case_insensitive<'a, 'b, I, J>(mut iter: I, mut prefix: J) -> Option<I>
+where
+    I: Iterator<Item = Component<'a>> + Clone,
+    J: Iterator<Item = Component<'b>>,
+{
+    loop {
+        let mut iter_next = iter.clone();
+        match (iter_next.next(), prefix.next()) {
+            (Some(ref x), Some(ref y)) if x.as_os_str().eq_ignore_ascii_case(y.as_os_str()) => (),
+            (Some(_), Some(_)) => return None,
+            (Some(_), None) => return Some(iter),
+            (None, None) => return Some(iter),
+            (None, Some(_)) => return None,
+        }
+        iter = iter_next;
     }
 }
