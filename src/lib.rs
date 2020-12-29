@@ -155,14 +155,14 @@ impl MiniFs {
     pub fn new() -> Self {
         Self {
             mount: LinkedList::new(),
-            case_sensitive: false,
+            case_sensitive: true,
         }
     }
 
-    pub fn new_caseless() -> Self {
+    pub fn new_case_insensitive() -> Self {
         Self {
             mount: LinkedList::new(),
-            case_sensitive: true,
+            case_sensitive: false,
         }
     }
 
