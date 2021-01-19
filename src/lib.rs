@@ -46,12 +46,15 @@
 //! [`Store`]: ./trait.Store.html
 //! [`LocalFs`]: ./struct.LocalFs.html
 //! [dir]: https://en.wikipedia.org/wiki/Directory_traversal_attack
-#![deny(warnings)]
+// #![deny(warnings)]
 #![feature(osstring_ascii)]
-use std::{collections::BTreeSet, io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom}};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{any::Any, collections::HashMap, ffi::OsString, path::Component};
+use std::{
+    collections::BTreeSet,
+    io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom},
+};
 use std::{env, fs};
 
 pub use caseless::CaselessFs;
@@ -149,7 +152,6 @@ impl Store for MiniFs {
         let candidates = self.collect_candidate(path);
 
         candidates.0.iter().for_each(|c| {
-            println!("candidates: {:?} pri: {}", path, c.priority);
             if candidate.is_none() || candidate.unwrap().priority < c.priority {
                 candidate = Some(c);
             }
@@ -160,8 +162,12 @@ impl Store for MiniFs {
             if candidates.1.is_some() && entries.is_ok() {
                 let mut vec: Vec<std::io::Result<Entry>> = entries.unwrap().collect();
                 for child in candidates.1.unwrap().children.keys() {
-                    vec.push(Ok(Entry { name: child.clone(), kind: EntryKind::Dir }));
+                    vec.push(Ok(Entry {
+                        name: child.clone(),
+                        kind: EntryKind::Dir,
+                    }));
                 }
+
                 Ok(Entries::new(VecIter::new(vec)))
             } else {
                 entries
@@ -195,8 +201,7 @@ impl MiniFs {
             store: Box::new(store::MapFile::new(store, |file: T| file.into())),
             priority,
         });
-        
-        println!("mounting {}", priority);
+
         self
     }
 
@@ -234,12 +239,15 @@ impl MiniFs {
     ) -> (Vec<StoreCandidate<'_>>, Option<&Folder>) {
         let case_sensitive = self.case_sensitive;
         let mut candidates = vec![];
-        let acc = path.as_ref().components().fold(
-            Some((&self.root, PathBuf::from("/"))),
-            |acc, component| {
+        let acc = path
+            .as_ref()
+            .components()
+            .map(|c| Some(c))
+            .chain(vec![None].into_iter())
+            .skip(1)
+            .fold(Some((&self.root, PathBuf::from("/"))), |acc, component| {
                 acc.and_then(|(current, prefix)| {
                     current.mounts.iter().for_each(|m| {
-                        println!("pushed candidate {} {}", component.as_os_str().to_str().unwrap(), m.priority);
                         candidates.push(StoreCandidate {
                             path: path
                                 .as_ref()
@@ -251,23 +259,19 @@ impl MiniFs {
                         })
                     });
 
-                    if component == Component::RootDir {
-                        Some((parent, prefix))
-                    } else {
-                        let name = Self::get_component_name(component, case_sensitive);
-                        if let Some(child) = parent.children.get(&name) {
+                    if let Some(component) = component {
+                        let name = Self::get_component_name(&component, case_sensitive);
+                        if let Some(child) = current.children.get(&name) {
                             let p = prefix.join(&name);
-
-
-                            
-                            Some((child, p))
+                            return Some((child, p));
                         } else {
-                            None
+                            return None;
                         }
                     }
+
+                    Some((current, prefix))
                 })
-            },
-        );
+            });
 
         (candidates, acc.map(|(f, _)| f))
     }
@@ -281,7 +285,7 @@ impl MiniFs {
                     return parent;
                 }
 
-                let name = Self::get_component_name(component, case_sensitive);
+                let name = Self::get_component_name(&component, case_sensitive);
 
                 if !parent.children.contains_key(&name) {
                     parent
@@ -303,13 +307,13 @@ impl MiniFs {
                 }
 
                 parent.and_then(|p| {
-                    let name = Self::get_component_name(component, case_sensitive);
+                    let name = Self::get_component_name(&component, case_sensitive);
                     p.children.get_mut(&name)
                 })
             })
     }
 
-    fn get_component_name(component: Component, case_sensitive: bool) -> OsString {
+    fn get_component_name(component: &Component, case_sensitive: bool) -> OsString {
         let mut name = component.as_os_str().to_owned();
         if case_sensitive {
             name = name.to_ascii_lowercase();
@@ -329,8 +333,8 @@ impl VecIter {
     pub fn new(entries: Vec<std::io::Result<Entry>>) -> Self {
         Self {
             entries,
-            index: 0, 
-            set: BTreeSet::new()
+            index: 0,
+            set: BTreeSet::new(),
         }
     }
 }
@@ -344,9 +348,11 @@ impl Iterator for VecIter {
                 let x = self.entries[self.index].as_ref();
                 match x {
                     Err(e) => return Some(Err(std::io::Error::from(e.kind()))),
-                    Ok(e) => if !self.set.contains(&e.name) {
-                        self.set.insert(e.name.clone());
-                        return Some(Ok(e.clone()));
+                    Ok(e) => {
+                        if !self.set.contains(&e.name) {
+                            self.set.insert(e.name.clone());
+                            return Some(Ok(e.clone()));
+                        }
                     }
                 }
 
