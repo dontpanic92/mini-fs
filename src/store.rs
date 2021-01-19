@@ -177,7 +177,7 @@ where
 }
 
 /// Iterator over the entries of the inner stores that skips duplicates.
-struct VecEntries<I> {
+pub(crate) struct VecEntries<I> {
     /// Inner iterators.
     inner: Vec<I>,
     /// Set identifying the entries that have been returned.

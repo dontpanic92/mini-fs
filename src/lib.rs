@@ -46,13 +46,15 @@
 //! [`Store`]: ./trait.Store.html
 //! [`LocalFs`]: ./struct.LocalFs.html
 //! [dir]: https://en.wikipedia.org/wiki/Directory_traversal_attack
-#![deny(warnings)]
+// #![deny(warnings)]
 #![feature(osstring_ascii)]
-use std::{any::Any, path::Component};
-use std::collections::LinkedList;
-use std::io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::{any::Any, collections::HashMap, ffi::OsString, path::Component};
+use std::{
+    collections::BTreeSet,
+    io::{Cursor, Error, ErrorKind, Read, Result, Seek, SeekFrom},
+};
 use std::{env, fs};
 
 pub use caseless::CaselessFs;
@@ -105,64 +107,83 @@ impl<T: UserFile> From<T> for File {
 }
 
 struct Mount {
-    path: PathBuf,
     store: Box<dyn Store<File = File>>,
+    priority: u32,
+}
+
+struct Folder {
+    name: OsString,
+    children: HashMap<OsString, Folder>,
+    mounts: Vec<Mount>,
+}
+
+impl Folder {
+    pub fn new(name: OsString) -> Self {
+        Folder {
+            name,
+            children: HashMap::new(),
+            mounts: vec![],
+        }
+    }
+}
+
+struct StoreCandidate<'a> {
+    path: PathBuf,
+    mount: &'a Mount,
+    priority: u32,
 }
 
 /// Virtual filesystem.
 pub struct MiniFs {
-    mount: LinkedList<Mount>,
+    root: Folder,
     case_sensitive: bool,
+    next_priority: u32,
 }
 
 impl Store for MiniFs {
     type File = File;
 
     fn open_path(&self, path: &Path) -> Result<File> {
-        let next = self.mount.iter().rev().find_map(|mnt| {
-            if let Ok(np) = path.strip_prefix_ex(&mnt.path, self.case_sensitive) {
-                Some((np, &mnt.store))
-            } else {
-                None
+        self.collect_candidate_do(path, &|c| c.mount.store.open_path(&c.path))
+    }
+
+    fn entries_path(&self, path: &Path) -> Result<Entries> {
+        let mut candidate: Option<&StoreCandidate> = None;
+        let candidates = self.collect_candidate(path);
+
+        candidates.0.iter().for_each(|c| {
+            if candidate.is_none() || candidate.unwrap().priority < c.priority {
+                candidate = Some(c);
             }
         });
-        if let Some((np, store)) = next {
-            store.open_path(np)
+
+        if let Some(c) = candidate {
+            let entries = c.mount.store.entries_path(&c.path);
+            if candidates.1.is_some() && entries.is_ok() {
+                let mut vec: Vec<std::io::Result<Entry>> = entries.unwrap().collect();
+                for child in candidates.1.unwrap().children.keys() {
+                    vec.push(Ok(Entry {
+                        name: child.clone(),
+                        kind: EntryKind::Dir,
+                    }));
+                }
+
+                Ok(Entries::new(VecIter::new(vec)))
+            } else {
+                entries
+            }
         } else {
             Err(Error::from(ErrorKind::NotFound))
         }
     }
-
-    fn entries_path(&self, path: &Path) -> Result<Entries> {
-        // FIXME creating a new PathBuf because otherwise I'm getting lifetime errors.
-        let path = path.to_path_buf();
-
-        Ok(Entries::new(
-            self.mount
-                .iter()
-                .rev()
-                .find(|m| path.strip_prefix_ex(&m.path, self.case_sensitive).is_ok())
-                .into_iter()
-                .flat_map(move |m| match path.strip_prefix_ex(&m.path, self.case_sensitive) {
-                    Ok(np) => m.store.entries_path(np).unwrap(),
-                    Err(_) => Entries::new(None),
-                }),
-        ))
-    }
 }
 
 impl MiniFs {
-    pub fn new() -> Self {
+    pub fn new(case_sensitive: bool) -> Self {
         Self {
-            mount: LinkedList::new(),
-            case_sensitive: true,
-        }
-    }
-
-    pub fn new_case_insensitive() -> Self {
-        Self {
-            mount: LinkedList::new(),
-            case_sensitive: false,
+            root: Folder::new(OsString::from("/")),
+            case_sensitive,
+            next_priority: 0,
         }
     }
 
@@ -172,9 +193,15 @@ impl MiniFs {
         S: Store<File = T> + 'static,
         T: Into<File>,
     {
-        let path = path.into();
-        let store = Box::new(store::MapFile::new(store, |file: T| file.into()));
-        self.mount.push_back(Mount { path, store });
+        let priority = self.next_priority;
+        self.next_priority += 1;
+
+        let dst = self.make_dir(path.into());
+        dst.mounts.push(Mount {
+            store: Box::new(store::MapFile::new(store, |file: T| file.into())),
+            priority,
+        });
+
         self
     }
 
@@ -182,14 +209,157 @@ impl MiniFs {
     where
         P: AsRef<Path>,
     {
-        let path = path.as_ref();
-        if let Some(p) = self.mount.iter().rposition(|p| p.path == path) {
-            let mut tail = self.mount.split_off(p);
-            let fs = tail.pop_front().map(|m| m.store);
-            self.mount.append(&mut tail);
-            fs
+        self.goto_dir(path.as_ref())
+            .and_then(|f| f.mounts.pop().and_then(|m| Some(m.store)))
+    }
+
+    fn collect_candidate_do<P: AsRef<Path>, T>(
+        &self,
+        path: P,
+        action: &dyn Fn(&StoreCandidate) -> Result<T>,
+    ) -> Result<T> {
+        let mut candidate: Option<&StoreCandidate> = None;
+        let candidates = self.collect_candidate(path);
+        candidates.0.iter().for_each(|c| {
+            if candidate.is_none() || candidate.unwrap().priority < c.priority {
+                candidate = Some(c);
+            }
+        });
+
+        if let Some(c) = candidate {
+            action(c)
         } else {
-            None
+            Err(Error::from(ErrorKind::NotFound))
+        }
+    }
+
+    fn collect_candidate<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> (Vec<StoreCandidate<'_>>, Option<&Folder>) {
+        let case_sensitive = self.case_sensitive;
+        let mut candidates = vec![];
+        let acc = path
+            .as_ref()
+            .components()
+            .map(|c| Some(c))
+            .chain(vec![None].into_iter())
+            .skip(1)
+            .fold(Some((&self.root, PathBuf::from("/"))), |acc, component| {
+                acc.and_then(|(current, prefix)| {
+                    current.mounts.iter().for_each(|m| {
+                        candidates.push(StoreCandidate {
+                            path: path
+                                .as_ref()
+                                .strip_prefix_ex(&prefix, self.case_sensitive)
+                                .unwrap()
+                                .to_owned(),
+                            mount: &m,
+                            priority: m.priority,
+                        })
+                    });
+
+                    if let Some(component) = component {
+                        let name = Self::get_component_name(&component, case_sensitive);
+                        if let Some(child) = current.children.get(&name) {
+                            let p = prefix.join(&name);
+                            return Some((child, p));
+                        } else {
+                            return None;
+                        }
+                    }
+
+                    Some((current, prefix))
+                })
+            });
+
+        (candidates, acc.map(|(f, _)| f))
+    }
+
+    fn make_dir<P: AsRef<Path>>(&mut self, path: P) -> &mut Folder {
+        let case_sensitive = self.case_sensitive;
+        path.as_ref()
+            .components()
+            .fold(&mut self.root, |parent, component| {
+                if component == Component::RootDir {
+                    return parent;
+                }
+
+                let name = Self::get_component_name(&component, case_sensitive);
+
+                if !parent.children.contains_key(&name) {
+                    parent
+                        .children
+                        .insert(name.clone(), Folder::new(name.clone()));
+                }
+
+                parent.children.get_mut(&name).unwrap()
+            })
+    }
+
+    fn goto_dir<P: AsRef<Path>>(&mut self, path: P) -> Option<&mut Folder> {
+        let case_sensitive = self.case_sensitive;
+        path.as_ref()
+            .components()
+            .fold(Some(&mut self.root), |parent, component| {
+                if component == Component::RootDir {
+                    return parent;
+                }
+
+                parent.and_then(|p| {
+                    let name = Self::get_component_name(&component, case_sensitive);
+                    p.children.get_mut(&name)
+                })
+            })
+    }
+
+    fn get_component_name(component: &Component, case_sensitive: bool) -> OsString {
+        let mut name = component.as_os_str().to_owned();
+        if case_sensitive {
+            name = name.to_ascii_lowercase();
+        }
+
+        name
+    }
+}
+
+pub struct VecIter {
+    entries: Vec<std::io::Result<Entry>>,
+    index: usize,
+    set: BTreeSet<OsString>,
+}
+
+impl VecIter {
+    pub fn new(entries: Vec<std::io::Result<Entry>>) -> Self {
+        Self {
+            entries,
+            index: 0,
+            set: BTreeSet::new(),
+        }
+    }
+}
+
+impl Iterator for VecIter {
+    type Item = std::io::Result<Entry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.index < self.entries.len() {
+                let x = self.entries[self.index].as_ref();
+                match x {
+                    Err(e) => return Some(Err(std::io::Error::from(e.kind()))),
+                    Ok(e) => {
+                        if !self.set.contains(&e.name) {
+                            self.set.insert(e.name.clone());
+                            return Some(Ok(e.clone()));
+                        }
+                    }
+                }
+
+                self.index += 1;
+            } else {
+                return None;
+            }
         }
     }
 }
@@ -321,15 +491,24 @@ impl RamFs {
     }
 }
 
+#[derive(Debug)]
 struct StripPrefixExError(());
 trait StripPrefixEx {
-    fn strip_prefix_ex<P>(&self, base: P, case_sensitivify: bool) -> std::result::Result<&Path, StripPrefixExError>
+    fn strip_prefix_ex<P>(
+        &self,
+        base: P,
+        case_sensitivify: bool,
+    ) -> std::result::Result<&Path, StripPrefixExError>
     where
         P: AsRef<Path>;
 }
 
 impl StripPrefixEx for Path {
-    fn strip_prefix_ex<P>(&self, base: P, case_sensitivify: bool) -> std::result::Result<&Path, StripPrefixExError>
+    fn strip_prefix_ex<P>(
+        &self,
+        base: P,
+        case_sensitivify: bool,
+    ) -> std::result::Result<&Path, StripPrefixExError>
     where
         P: AsRef<Path>,
     {
@@ -341,7 +520,10 @@ impl StripPrefixEx for Path {
     }
 }
 
-fn _strip_prefix_case_insensitive<'a>(path: &'a Path, base: &Path) -> std::result::Result<&'a Path, StripPrefixExError> {
+fn _strip_prefix_case_insensitive<'a>(
+    path: &'a Path,
+    base: &Path,
+) -> std::result::Result<&'a Path, StripPrefixExError> {
     iter_after_case_insensitive(path.components(), base.components())
         .map(|c| c.as_path())
         .ok_or(StripPrefixExError(()))
