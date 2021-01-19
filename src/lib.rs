@@ -112,15 +112,13 @@ struct Mount {
 }
 
 struct Folder {
-    name: OsString,
     children: HashMap<OsString, Folder>,
     mounts: Vec<Mount>,
 }
 
 impl Folder {
-    pub fn new(name: OsString) -> Self {
+    pub fn new() -> Self {
         Folder {
-            name,
             children: HashMap::new(),
             mounts: vec![],
         }
@@ -144,18 +142,19 @@ impl Store for MiniFs {
     type File = File;
 
     fn open_path(&self, path: &Path) -> Result<File> {
-        self.collect_candidate_do(path, &|c| c.mount.store.open_path(&c.path))
+        let candidates = self.collect_candidate(path);
+        let candidate = Self::choose_candidate(candidates.0);
+
+        if let Some(c) = candidate {
+            c.mount.store.open_path(&c.path)
+        } else {
+            Err(Error::from(ErrorKind::NotFound))
+        }
     }
 
     fn entries_path(&self, path: &Path) -> Result<Entries> {
-        let mut candidate: Option<&StoreCandidate> = None;
         let candidates = self.collect_candidate(path);
-
-        candidates.0.iter().for_each(|c| {
-            if candidate.is_none() || candidate.unwrap().priority < c.priority {
-                candidate = Some(c);
-            }
-        });
+        let candidate = Self::choose_candidate(candidates.0);
 
         if let Some(c) = candidate {
             let entries = c.mount.store.entries_path(&c.path);
@@ -181,7 +180,7 @@ impl Store for MiniFs {
 impl MiniFs {
     pub fn new(case_sensitive: bool) -> Self {
         Self {
-            root: Folder::new(OsString::from("/")),
+            root: Folder::new(),
             case_sensitive,
             next_priority: 0,
         }
@@ -213,24 +212,16 @@ impl MiniFs {
             .and_then(|f| f.mounts.pop().and_then(|m| Some(m.store)))
     }
 
-    fn collect_candidate_do<P: AsRef<Path>, T>(
-        &self,
-        path: P,
-        action: &dyn Fn(&StoreCandidate) -> Result<T>,
-    ) -> Result<T> {
-        let mut candidate: Option<&StoreCandidate> = None;
-        let candidates = self.collect_candidate(path);
-        candidates.0.iter().for_each(|c| {
-            if candidate.is_none() || candidate.unwrap().priority < c.priority {
-                candidate = Some(c);
-            }
-        });
-
-        if let Some(c) = candidate {
-            action(c)
-        } else {
-            Err(Error::from(ErrorKind::NotFound))
-        }
+    fn choose_candidate(candidates: Vec<StoreCandidate>) -> Option<StoreCandidate> {
+        candidates
+            .into_iter()
+            .fold(None, |acc: Option<StoreCandidate>, cur| {
+                if acc.is_none() || acc.as_ref().unwrap().priority < cur.priority {
+                    Some(cur)
+                } else {
+                    acc
+                }
+            })
     }
 
     fn collect_candidate<P: AsRef<Path>>(
@@ -288,9 +279,7 @@ impl MiniFs {
                 let name = Self::get_component_name(&component, case_sensitive);
 
                 if !parent.children.contains_key(&name) {
-                    parent
-                        .children
-                        .insert(name.clone(), Folder::new(name.clone()));
+                    parent.children.insert(name.clone(), Folder::new());
                 }
 
                 parent.children.get_mut(&name).unwrap()
@@ -315,7 +304,7 @@ impl MiniFs {
 
     fn get_component_name(component: &Component, case_sensitive: bool) -> OsString {
         let mut name = component.as_os_str().to_owned();
-        if case_sensitive {
+        if !case_sensitive {
             name = name.to_ascii_lowercase();
         }
 
