@@ -12,9 +12,9 @@ exclude = [".pages/*"]
 edition = "2018"
 
 [dependencies]
-tar_ = { package = "tar", version = "0.4.23", optional = true }
-zip_ = { package = "zip", version = "0.5.2", optional = true }
-flate2 = { version = "1.0.7", optional = true }
+tar_ = { package = "tar", version = "0.4.38", optional = true }
+zip_ = { package = "zip", version = "0.5.13", optional = true }
+flate2 = { version = "1.0.22", optional = true }
 
 [features]
 default = ["tar", "zip"]

@@ -47,7 +47,6 @@
 //! [`LocalFs`]: ./struct.LocalFs.html
 //! [dir]: https://en.wikipedia.org/wiki/Directory_traversal_attack
 // #![deny(warnings)]
-#![feature(osstring_ascii)]
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{any::Any, collections::HashMap, ffi::OsString, path::Component};
