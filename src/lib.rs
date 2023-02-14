@@ -47,7 +47,6 @@
 //! [`LocalFs`]: ./struct.LocalFs.html
 //! [dir]: https://en.wikipedia.org/wiki/Directory_traversal_attack
 // #![deny(warnings)]
-#![feature(osstring_ascii)]
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::{any::Any, collections::HashMap, ffi::OsString, path::Component};
@@ -142,37 +141,72 @@ impl Store for MiniFs {
     type File = File;
 
     fn open_path(&self, path: &Path) -> Result<File> {
-        let candidates = self.collect_candidate(path);
-        let candidate = Self::choose_candidate(candidates.0);
+        let mut candidates = self.collect_candidate(path).0;
+        candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+        // let candidate = Self::choose_candidate(candidates.0);
 
-        if let Some(c) = candidate {
-            c.mount.store.open_path(&c.path)
-        } else {
-            Err(Error::from(ErrorKind::NotFound))
+        for candidate in candidates {
+            let res = candidate.mount.store.open_path(&candidate.path);
+            if res.is_ok() {
+                return res;
+            }
         }
+
+        Err(Error::from(ErrorKind::NotFound))
     }
 
     fn entries_path(&self, path: &Path) -> Result<Entries> {
         let candidates = self.collect_candidate(path);
-        let candidate = Self::choose_candidate(candidates.0);
+        // let candidate = Self::choose_candidate(candidates.0);
 
-        if let Some(c) = candidate {
-            let entries = c.mount.store.entries_path(&c.path);
-            if candidates.1.is_some() && entries.is_ok() {
-                let mut vec: Vec<std::io::Result<Entry>> = entries.unwrap().collect();
-                for child in candidates.1.unwrap().children.keys() {
-                    vec.push(Ok(Entry {
+        struct PrioritizedEntry {
+            priority: u32,
+            entry: Entry,
+        }
+
+        let mut entries = HashMap::new();
+        let mut insert_entry = |e: Entry, priority: u32| {
+            entries
+                .entry(e.name.to_ascii_lowercase())
+                .and_modify(|pe: &mut PrioritizedEntry| {
+                    if pe.priority < priority {
+                        *pe = PrioritizedEntry {
+                            priority,
+                            entry: e.clone(),
+                        };
+                    }
+                })
+                .or_insert(PrioritizedEntry { priority, entry: e });
+        };
+
+        for candidate in &candidates.0 {
+            let c_entries = candidate.mount.store.entries_path(&candidate.path);
+            if let Ok(c_entries) = c_entries {
+                for e in c_entries {
+                    if let Ok(e) = e {
+                        insert_entry(e, candidate.priority);
+                    }
+                }
+            }
+        }
+
+        if candidates.1.is_some() {
+            for child in candidates.1.unwrap().children.keys() {
+                insert_entry(
+                    Entry {
                         name: child.clone(),
                         kind: EntryKind::Dir,
-                    }));
-                }
-
-                Ok(Entries::new(VecIter::new(vec)))
-            } else {
-                entries
+                    },
+                    0,
+                );
             }
-        } else {
+        }
+
+        if entries.is_empty() {
             Err(Error::from(ErrorKind::NotFound))
+        } else {
+            let entries = entries.into_values().map(|v| Ok(v.entry)).collect();
+            Ok(Entries::new(VecIter::new(entries)))
         }
     }
 }
@@ -182,7 +216,7 @@ impl MiniFs {
         Self {
             root: Folder::new(),
             case_sensitive,
-            next_priority: 0,
+            next_priority: 1,
         }
     }
 

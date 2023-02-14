@@ -112,7 +112,7 @@ fn find_next_ascii_lowercase<S: Store>(
             return next;
         }
         _ => {
-            panic!(format!("unexpected path component {:?}", component));
+            panic!("unexpected path component {:?}", component);
         }
     };
     if let Some(t_s) = target.to_str() {
