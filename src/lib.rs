@@ -143,7 +143,6 @@ impl Store for MiniFs {
     fn open_path(&self, path: &Path) -> Result<File> {
         let mut candidates = self.collect_candidate(path).0;
         candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
-        // let candidate = Self::choose_candidate(candidates.0);
 
         for candidate in candidates {
             let res = candidate.mount.store.open_path(&candidate.path);
@@ -157,7 +156,6 @@ impl Store for MiniFs {
 
     fn entries_path(&self, path: &Path) -> Result<Entries> {
         let candidates = self.collect_candidate(path);
-        // let candidate = Self::choose_candidate(candidates.0);
 
         struct PrioritizedEntry {
             priority: u32,
@@ -202,12 +200,8 @@ impl Store for MiniFs {
             }
         }
 
-        if entries.is_empty() {
-            Err(Error::from(ErrorKind::NotFound))
-        } else {
-            let entries = entries.into_values().map(|v| Ok(v.entry)).collect();
-            Ok(Entries::new(VecIter::new(entries)))
-        }
+        let entries = entries.into_values().map(|v| Ok(v.entry)).collect();
+        Ok(Entries::new(VecIter::new(entries)))
     }
 }
 
@@ -338,9 +332,6 @@ impl MiniFs {
 
     fn get_component_name(component: &Component, case_sensitive: bool) -> OsString {
         let mut name = component.as_os_str().to_owned();
-        if !case_sensitive {
-            name = name.to_ascii_lowercase();
-        }
 
         name
     }
@@ -530,12 +521,12 @@ impl StripPrefixEx for Path {
     fn strip_prefix_ex<P>(
         &self,
         base: P,
-        case_sensitivify: bool,
+        case_sensitivity: bool,
     ) -> std::result::Result<&Path, StripPrefixExError>
     where
         P: AsRef<Path>,
     {
-        if case_sensitivify {
+        if case_sensitivity {
             self.strip_prefix(base).or(Err(StripPrefixExError(())))
         } else {
             _strip_prefix_case_insensitive(&self, base.as_ref())
