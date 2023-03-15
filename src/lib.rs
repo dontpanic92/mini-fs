@@ -112,6 +112,7 @@ struct Mount {
 
 struct Folder {
     children: HashMap<OsString, Folder>,
+    case_map: HashMap<OsString, OsString>,
     mounts: Vec<Mount>,
 }
 
@@ -119,8 +120,28 @@ impl Folder {
     pub fn new() -> Self {
         Folder {
             children: HashMap::new(),
+            case_map: HashMap::new(),
             mounts: vec![],
         }
+    }
+
+    pub fn get_child_mut(&mut self, name: &OsString, case_sensitive: bool) -> Option<&mut Folder> {
+        let name = if !case_sensitive {
+            self.case_map.get(&name.to_ascii_lowercase())?
+        } else {
+            name
+        };
+
+        self.children.get_mut(name)
+    }
+
+    pub fn get_child(&self, name: &OsString, case_sensitive: bool) -> Option<&Folder> {
+        let name = if !case_sensitive {
+            self.case_map.get(&name.to_ascii_lowercase())?
+        } else {
+            name
+        };
+        self.children.get(name)
     }
 }
 
@@ -142,6 +163,7 @@ impl Store for MiniFs {
 
     fn open_path(&self, path: &Path) -> Result<File> {
         let mut candidates = self.collect_candidate(path).0;
+
         candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         for candidate in candidates {
@@ -270,7 +292,7 @@ impl MiniFs {
                         candidates.push(StoreCandidate {
                             path: path
                                 .as_ref()
-                                .strip_prefix_ex(&prefix, self.case_sensitive)
+                                .strip_prefix_ex(&prefix, case_sensitive)
                                 .unwrap()
                                 .to_owned(),
                             mount: &m,
@@ -279,8 +301,8 @@ impl MiniFs {
                     });
 
                     if let Some(component) = component {
-                        let name = Self::get_component_name(&component, case_sensitive);
-                        if let Some(child) = current.children.get(&name) {
+                        let name = component.as_os_str().to_owned();
+                        if let Some(child) = current.get_child(&name, case_sensitive) {
                             let p = prefix.join(&name);
                             return Some((child, p));
                         } else {
@@ -304,13 +326,16 @@ impl MiniFs {
                     return parent;
                 }
 
-                let name = Self::get_component_name(&component, case_sensitive);
+                let name = component.as_os_str().to_owned();
 
-                if !parent.children.contains_key(&name) {
+                if parent.get_child(&name, case_sensitive).is_none() {
                     parent.children.insert(name.clone(), Folder::new());
+                    parent
+                        .case_map
+                        .insert(name.to_ascii_lowercase(), name.clone());
                 }
 
-                parent.children.get_mut(&name).unwrap()
+                parent.get_child_mut(&name, case_sensitive).unwrap()
             })
     }
 
@@ -324,16 +349,10 @@ impl MiniFs {
                 }
 
                 parent.and_then(|p| {
-                    let name = Self::get_component_name(&component, case_sensitive);
-                    p.children.get_mut(&name)
+                    let name = component.as_os_str().to_owned();
+                    p.get_child_mut(&name, case_sensitive)
                 })
             })
-    }
-
-    fn get_component_name(component: &Component, case_sensitive: bool) -> OsString {
-        let mut name = component.as_os_str().to_owned();
-
-        name
     }
 }
 
