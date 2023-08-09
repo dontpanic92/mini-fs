@@ -289,15 +289,14 @@ impl MiniFs {
             .fold(Some((&self.root, PathBuf::from("/"))), |acc, component| {
                 acc.and_then(|(current, prefix)| {
                     current.mounts.iter().for_each(|m| {
-                        candidates.push(StoreCandidate {
-                            path: path
-                                .as_ref()
-                                .strip_prefix_ex(&prefix, case_sensitive)
-                                .unwrap()
-                                .to_owned(),
-                            mount: &m,
-                            priority: m.priority,
-                        })
+                        let path = path.as_ref().strip_prefix_ex(&prefix, case_sensitive);
+                        if let Ok(path) = path {
+                            candidates.push(StoreCandidate {
+                                path: path.to_path_buf(),
+                                mount: &m,
+                                priority: m.priority,
+                            })
+                        }
                     });
 
                     if let Some(component) = component {
