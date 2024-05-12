@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Cursor, ErrorKind, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, MAIN_SEPARATOR_STR};
 
 use zip_::ZipArchive;
 
@@ -90,7 +90,13 @@ impl<T: Read + Seek> Store for ZipFs<T> {
             ErrorKind::Other,
             "Utf8 path conversion error.",
         ));
-        let mut file = archive.by_name(name?)?;
+
+        let name = name?
+            .replace('/', MAIN_SEPARATOR_STR)
+            .replace('\\', MAIN_SEPARATOR_STR)
+            .to_lowercase();
+
+        let mut file = archive.by_name(&name)?;
 
         let mut v = Vec::new();
         file.read_to_end(&mut v)?;
