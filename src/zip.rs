@@ -16,7 +16,8 @@ use crate::{Entries, Entry};
 /// When used with a `std::fs::File`, the file will remain open for the lifetime
 /// of the Zip.
 pub struct ZipFs<T: Read + Seek> {
-    inner: RefCell<T>,
+    // inner: RefCell<T>,
+    archive: RefCell<ZipArchive<T>>,
     index: Option<Index<()>>,
 }
 
@@ -53,7 +54,8 @@ impl ZipFs<fs::File> {
 impl<T: Read + Seek> ZipFs<T> {
     pub fn new(inner: T) -> Self {
         Self {
-            inner: RefCell::new(inner),
+            // inner: RefCell::new(inner),
+            archive: RefCell::new(ZipArchive::new(inner).unwrap()),
             index: None,
         }
     }
@@ -64,9 +66,10 @@ impl<T: Read + Seek> ZipFs<T> {
     /// entries_path and entries methods.
     pub fn index(mut self) -> io::Result<Self> {
         let mut index = Index::new();
-        let mut file = self.inner.borrow_mut();
-        file.seek(SeekFrom::Start(0))?;
-        let mut archive = ZipArchive::new(&mut *file)?;
+        // let mut file = self.inner.borrow_mut();
+        // file.seek(SeekFrom::Start(0))?;
+        // let mut archive = ZipArchive::new(&mut *file)?;
+        let mut archive = self.archive.borrow_mut();
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
             let path = file.mangled_name();
@@ -74,7 +77,8 @@ impl<T: Read + Seek> ZipFs<T> {
             index.insert(path, ());
         }
         self.index = Some(index);
-        drop(file);
+        // drop(file);
+        drop(archive);
         Ok(self)
     }
 }
@@ -82,10 +86,10 @@ impl<T: Read + Seek> ZipFs<T> {
 impl<T: Read + Seek> Store for ZipFs<T> {
     type File = ZipFsFile;
     fn open_path(&self, path: &Path) -> io::Result<Self::File> {
-        let mut file = self.inner.borrow_mut();
-        file.seek(SeekFrom::Start(0))?;
+        // let mut file = self.inner.borrow_mut();
+        // file.seek(SeekFrom::Start(0))?;
 
-        let mut archive = ZipArchive::new(&mut *file)?;
+        // let mut archive = ZipArchive::new(&mut *file)?;
         let name = path.to_str().ok_or(io::Error::new(
             ErrorKind::Other,
             "Utf8 path conversion error.",
@@ -96,6 +100,7 @@ impl<T: Read + Seek> Store for ZipFs<T> {
             .replace('\\', MAIN_SEPARATOR_STR)
             .to_lowercase();
 
+        let mut archive = self.archive.borrow_mut();
         let mut file = archive.by_name(&name)?;
 
         let mut v = Vec::new();
